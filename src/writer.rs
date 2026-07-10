@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::{Write, Seek, SeekFrom};
 use std::os::fd::{FromRawFd, RawFd};
 use std::path::PathBuf;
-use zip::{ZipWriter, write::FileOptions as ZipFileOptions};
+use zip::{ZipWriter, write::FileOptions as ZipFileOptions, CompressionMethod};
 use tar::Builder as TarBuilder;
 use crate::error::CbzError;
 
@@ -107,7 +107,8 @@ impl ZipComicWriter {
 
 impl ComicWriter for ZipComicWriter {
     fn write_page(&mut self, page_name: &str, data: &[u8]) -> Result<(), CbzError> {
-        self.zip.start_file(page_name, ZipFileOptions::default())?;
+        let options = ZipFileOptions::default().compression_method(CompressionMethod::Stored);
+        self.zip.start_file(page_name, options)?;
         self.zip.write_all(data)?;
         Ok(())
     }
