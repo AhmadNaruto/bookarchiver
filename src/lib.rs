@@ -63,6 +63,29 @@ pub unsafe extern "system" fn Java_bookarchiver_BookReader_nativeInit(
     }
 }
 
+/// Inisialisasi BookReader native dari Path lokal (arsip atau direktori folder)
+#[no_mangle]
+pub unsafe extern "system" fn Java_bookarchiver_BookReader_nativeInitPath(
+    mut env: JNIEnv,
+    _class: JClass,
+    path: JString,
+) -> jlong {
+    let path_str: String = match env.get_string(&path) {
+        Ok(s) => s.into(),
+        Err(_) => return 0,
+    };
+
+    match CbzReader::from_path(&path_str) {
+        Ok(reader) => {
+            Box::into_raw(Box::new(reader)) as jlong
+        }
+        Err(e) => {
+            throw_book_exception(&mut env, &e);
+            0
+        }
+    }
+}
+
 /// Mengambil daftar halaman komik
 #[no_mangle]
 pub unsafe extern "system" fn Java_bookarchiver_BookReader_nativeGetPages(
@@ -79,7 +102,6 @@ pub unsafe extern "system" fn Java_bookarchiver_BookReader_nativeGetPages(
                 Err(_) => return std::ptr::null_mut(),
             };
 
-            // String inisialisasi awal untuk array
             let initial_element = match env.new_string("") {
                 Ok(s) => s,
                 Err(_) => return std::ptr::null_mut(),
@@ -90,7 +112,6 @@ pub unsafe extern "system" fn Java_bookarchiver_BookReader_nativeGetPages(
                 Err(_) => return std::ptr::null_mut(),
             };
 
-            // Isi array dengan string halaman dari Rust
             for (i, page) in pages.iter().enumerate() {
                 let java_string = match env.new_string(page) {
                     Ok(s) => s,
@@ -99,7 +120,6 @@ pub unsafe extern "system" fn Java_bookarchiver_BookReader_nativeGetPages(
                 if env.set_object_array_element(&array, i as jint, &java_string).is_err() {
                     return std::ptr::null_mut();
                 }
-                // Hapus local reference untuk mencegah table overflow (sangat penting untuk komik yang panjang)
                 let _ = env.delete_local_ref(java_string);
             }
 
@@ -183,7 +203,39 @@ pub unsafe extern "system" fn Java_bookarchiver_BookWriter_nativeInit(
     }
 }
 
-/// Menulis halaman ke file zip/tar/bbf
+/// Inisialisasi BookWriter native dari Path lokal dengan pilihan format komik
+#[no_mangle]
+pub unsafe extern "system" fn Java_bookarchiver_BookWriter_nativeInitPath(
+    mut env: JNIEnv,
+    _class: JClass,
+    path: JString,
+    format_ordinal: jint,
+) -> jlong {
+    let path_str: String = match env.get_string(&path) {
+        Ok(s) => s.into(),
+        Err(_) => return 0,
+    };
+
+    let format = match BookFormat::from_i32(format_ordinal) {
+        Ok(f) => f,
+        Err(e) => {
+            throw_book_exception(&mut env, &e);
+            return 0;
+        }
+    };
+
+    match CbzWriter::from_path(&path_str, format) {
+        Ok(writer) => {
+            Box::into_raw(Box::new(writer)) as jlong
+        }
+        Err(e) => {
+            throw_book_exception(&mut env, &e);
+            0
+        }
+    }
+}
+
+/// Menulis halaman ke file zip/tar/bbf/folder
 #[no_mangle]
 pub unsafe extern "system" fn Java_bookarchiver_BookWriter_nativeWritePage(
     mut env: JNIEnv,

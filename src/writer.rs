@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::{Write, Seek, SeekFrom};
 use std::os::fd::{FromRawFd, RawFd};
+use std::path::PathBuf;
 use zip::{ZipWriter, write::FileOptions as ZipFileOptions};
 use tar::Builder as TarBuilder;
 use crate::error::CbzError;
@@ -21,6 +22,7 @@ pub enum BookFormat {
     Cb7 = 2,
     Cbt = 3,
     Bbf = 4,
+    Directory = 5,
 }
 
 impl BookFormat {
@@ -31,12 +33,14 @@ impl BookFormat {
             2 => Ok(BookFormat::Cb7),
             3 => Ok(BookFormat::Cbt),
             4 => Ok(BookFormat::Bbf),
+            5 => Ok(BookFormat::Directory),
             _ => Err(CbzError::UnsupportedFormat),
         }
     }
 }
 
 impl CbzWriter {
+    /// Inisialisasi Writer menggunakan Android File Descriptor secara aman
     pub fn from_fd(fd: RawFd, format: BookFormat) -> Result<Self, CbzError> {
         let native_fd = unsafe { libc::dup(fd) };
         if native_fd < 0 {
@@ -50,6 +54,24 @@ impl CbzWriter {
             BookFormat::Cbt => Box::new(TarComicWriter::new(file)),
             BookFormat::Bbf => Box::new(BbfComicWriter::new(file)),
             _ => return Err(CbzError::UnsupportedFormat),
+        };
+
+        Ok(Self { inner: Some(inner) })
+    }
+
+    /// Inisialisasi Writer menggunakan path local (berkas arsip atau folder direktori)
+    pub fn from_path(path: &str, format: BookFormat) -> Result<Self, CbzError> {
+        let inner: Box<dyn ComicWriter> = match format {
+            BookFormat::Directory => Box::new(DirectoryComicWriter::new(path)),
+            _ => {
+                let file = File::create(path)?;
+                match format {
+                    BookFormat::Cbz => Box::new(ZipComicWriter::new(file)),
+                    BookFormat::Cbt => Box::new(TarComicWriter::new(file)),
+                    BookFormat::Bbf => Box::new(BbfComicWriter::new(file)),
+                    _ => return Err(CbzError::UnsupportedFormat),
+                }
+            }
         };
 
         Ok(Self { inner: Some(inner) })
@@ -233,10 +255,36 @@ impl ComicWriter for BbfComicWriter {
     }
 }
 
+// ---------------- Directory Comic Writer (Extracted Folder) ----------------
+struct DirectoryComicWriter {
+    dir_path: PathBuf,
+}
+
+impl DirectoryComicWriter {
+    fn new(path: &str) -> Self {
+        let dir_path = PathBuf::from(path);
+        let _ = std::fs::create_dir_all(&dir_path);
+        Self { dir_path }
+    }
+}
+
+impl ComicWriter for DirectoryComicWriter {
+    fn write_page(&mut self, page_name: &str, data: &[u8]) -> Result<(), CbzError> {
+        let file_path = self.dir_path.join(page_name);
+        let mut file = File::create(file_path)?;
+        file.write_all(data)?;
+        Ok(())
+    }
+
+    fn finish(self: Box<Self>) -> Result<(), CbzError> {
+        Ok(())
+    }
+}
+
+// ---------------- Integration Tests ----------------
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::fd::AsRawFd;
     use crate::reader::CbzReader;
 
     #[test]
@@ -247,14 +295,13 @@ mod tests {
             (BookFormat::Cbz, "target/test_comic.cbz"),
             (BookFormat::Cbt, "target/test_comic.cbt"),
             (BookFormat::Bbf, "target/test_comic.bbf"),
+            (BookFormat::Directory, "target/test_comic_dir"),
         ];
 
         for (format, path) in formats {
             // Write
             {
-                let file = File::create(path).unwrap();
-                let fd = file.as_raw_fd();
-                let mut writer = CbzWriter::from_fd(fd, format).unwrap();
+                let mut writer = CbzWriter::from_path(path, format).unwrap();
                 writer.write_page("0001.jpg", b"page1data").unwrap();
                 writer.write_page("0002.png", b"page2data").unwrap();
                 writer.finish().unwrap();
@@ -262,9 +309,7 @@ mod tests {
 
             // Read & Verify
             {
-                let file = File::open(path).unwrap();
-                let fd = file.as_raw_fd();
-                let reader = CbzReader::from_fd(fd).unwrap();
+                let reader = CbzReader::from_path(path).unwrap();
                 let pages = reader.get_pages().unwrap();
                 
                 assert_eq!(pages.len(), 2);
@@ -279,8 +324,11 @@ mod tests {
             }
 
             // Clean up
-            std::fs::remove_file(path).unwrap();
+            if format == BookFormat::Directory {
+                std::fs::remove_dir_all(path).unwrap();
+            } else {
+                std::fs::remove_file(path).unwrap();
+            }
         }
     }
 }
-

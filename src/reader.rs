@@ -2,6 +2,7 @@ use std::fs::File;
 use std::io::{Read, Cursor};
 use std::os::fd::{FromRawFd, RawFd};
 use std::sync::Arc;
+use std::path::PathBuf;
 use memmap2::Mmap;
 use zip::ZipArchive;
 use tar::Archive as TarArchive;
@@ -24,7 +25,7 @@ pub trait ComicReader: Send + Sync {
 }
 
 pub struct CbzReader {
-    _file: File,
+    _file: Option<File>,
     inner: Box<dyn ComicReader>,
 }
 
@@ -37,7 +38,22 @@ impl CbzReader {
         }
 
         let file = unsafe { File::from_raw_fd(native_fd) };
-        
+        Self::from_file(file)
+    }
+
+    /// Inisialisasi Reader menggunakan Path direktori atau berkas arsip
+    pub fn from_path(path: &str) -> Result<Self, CbzError> {
+        let path_buf = PathBuf::from(path);
+        if path_buf.is_dir() {
+            let inner = Box::new(DirectoryComicReader::new(path)?);
+            Ok(Self { _file: None, inner })
+        } else {
+            let file = File::open(&path_buf)?;
+            Self::from_file(file)
+        }
+    }
+
+    pub fn from_file(file: File) -> Result<Self, CbzError> {
         // Auto-detect format dari bytes header
         let mut check_file = file.try_clone()?;
         let mut header_buf = [0u8; 512];
@@ -61,7 +77,7 @@ impl CbzReader {
             Box::new(ZipComicReader::new(&file)?)
         };
 
-        Ok(Self { _file: file, inner })
+        Ok(Self { _file: Some(file), inner })
     }
 
     pub fn get_pages(&self) -> Result<Vec<String>, CbzError> {
@@ -369,6 +385,53 @@ impl ComicReader for BbfComicReader {
         let end = (offset + size) as usize;
         
         Ok(self.mmap[start..end].to_vec())
+    }
+}
+
+// ---------------- Directory Comic Reader (Extracted Folder) ----------------
+struct DirectoryComicReader {
+    dir_path: PathBuf,
+    pages: Vec<String>,
+}
+
+impl DirectoryComicReader {
+    fn new(path: &str) -> Result<Self, CbzError> {
+        let dir_path = PathBuf::from(path);
+        if !dir_path.is_dir() {
+            return Err(CbzError::UnsupportedFormat);
+        }
+
+        let mut pages = Vec::new();
+        for entry_res in std::fs::read_dir(&dir_path)? {
+            let entry = entry_res?;
+            let file_type = entry.file_type()?;
+            if file_type.is_file() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if is_image_file(&name) {
+                    pages.push(name);
+                }
+            }
+        }
+        pages.sort_by(|a, b| alphanumeric_sort::compare_str(a, b));
+
+        Ok(Self { dir_path, pages })
+    }
+}
+
+impl ComicReader for DirectoryComicReader {
+    fn get_pages(&self) -> Result<Vec<String>, CbzError> {
+        Ok(self.pages.clone())
+    }
+
+    fn read_page(&self, page_name: &str) -> Result<Vec<u8>, CbzError> {
+        if !self.pages.contains(&page_name.to_string()) {
+            return Err(CbzError::PageNotFound(page_name.to_string()));
+        }
+        let file_path = self.dir_path.join(page_name);
+        let mut file = File::open(file_path)?;
+        let mut buffer = Vec::new();
+        file.read_to_end(&mut buffer)?;
+        Ok(buffer)
     }
 }
 

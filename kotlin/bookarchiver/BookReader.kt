@@ -2,15 +2,23 @@ package bookarchiver
 
 import android.os.ParcelFileDescriptor
 
-class BookReader(pfd: ParcelFileDescriptor) : AutoCloseable {
+class BookReader : AutoCloseable {
     // Menyimpan alamat pointer memori native Rust
     private var nativePtr: Long = 0
 
-    init {
-        // Mengirimkan file descriptor (fd) ke Rust
+    // Constructor untuk membuka berkas via Android File Descriptor (Scoped Storage)
+    constructor(pfd: ParcelFileDescriptor) {
         nativePtr = nativeInit(pfd.fd)
         if (nativePtr == 0L) {
             throw BookInitializationException("Gagal menginisialisasi Native BookReader")
+        }
+    }
+
+    // Constructor untuk membuka direktori lokal atau path berkas arsip secara langsung
+    constructor(path: String) {
+        nativePtr = nativeInitPath(path)
+        if (nativePtr == 0L) {
+            throw BookInitializationException("Gagal menginisialisasi Native BookReader dengan path: $path")
         }
     }
 
@@ -34,13 +42,14 @@ class BookReader(pfd: ParcelFileDescriptor) : AutoCloseable {
 
     // --- Native Link ---
     private native fun nativeInit(fd: Int): Long
+    private native fun nativeInitPath(path: String): Long
     private native fun nativeGetPages(ptr: Long): Array<String>
     private native fun nativeReadPage(ptr: Long, pageName: String): ByteArray?
     private native fun nativeClose(ptr: Long)
 
     companion object {
         init {
-            System.loadLibrary("bookarchiver")
+            System.loadLibrary("cbz_native")
         }
     }
 }
