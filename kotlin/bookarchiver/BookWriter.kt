@@ -29,6 +29,10 @@ class BookWriter : AutoCloseable {
         }
     }
 
+    fun writePage(pageName: String, inputStream: java.io.InputStream) {
+        writePage(pageName, inputStream.readBytes())
+    }
+
     override fun close() {
         if (nativePtr != 0L) {
             nativeClose(nativePtr)
