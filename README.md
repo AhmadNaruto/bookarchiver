@@ -6,7 +6,7 @@
 
 **BookArchiver** adalah library native berkinerja tinggi yang ditulis menggunakan **Rust** dengan antarmuka **JNI (Java Native Interface)** khusus untuk platform **Android**. Library ini dirancang untuk membaca (**Reader**) dan menulis (**Writer**) berbagai format arsip buku komik secara instan menggunakan memori terpetakan (Memory-Mapped file) dan pengindeksan ter-cache.
 
-Untuk mendukung kebijakan Android Scoped Storage modern, library ini bekerja sepenuhnya menggunakan **File Descriptor (FD)** numerik, bukan direct file path.
+Untuk mendukung kebijakan Android Scoped Storage modern, library ini bekerja menggunakan **File Descriptor (FD)** numerik dan juga mendukung **Path File/Direktori** lokal secara langsung.
 
 ---
 
@@ -18,6 +18,7 @@ Untuk mendukung kebijakan Android Scoped Storage modern, library ini bekerja sep
   - **CBT** (Comic Book Tar): Membaca dan menulis dengan performa tinggi (`O(1)` offset-cache lookup untuk random access).
   - **CB7** (Comic Book 7z): Membaca arsip 7z menggunakan library pure Rust `sevenz-rust`.
   - **BBF** (Bound Book Format): Membaca dan menulis format kontainer manga modern berkinerja tinggi (Zero-copy memory mapped parsing).
+  - **DIRECTORY** (Folder Gambar): Membaca dan menulis halaman komik langsung dari/ke direktori folder lokal biasa (extracted folder).
   - **CBR** (Comic Book RAR): Dukungan placeholder/stub untuk pembacaan berkas RAR.
 - **Keamanan Memori & Stabilitas**:
   - Manajemen referensi lokal JNI secara otomatis untuk mencegah kegagalan JVM (`Local Reference Table Overflow`) saat memproses komik dengan ratusan halaman.
@@ -34,8 +35,8 @@ bookarchiver/
 ├── proguard-rules.pro        # Aturan ProGuard/R8 untuk Android
 ├── src/                      # Source code Rust
 │   ├── lib.rs                # JNI Bridge entrypoints & exception mapping
-│   ├── reader.rs             # Implementasi pembaca (Zip, Tar, 7z, BBF)
-│   ├── writer.rs             # Implementasi penulis (Zip, Tar, BBF)
+│   ├── reader.rs             # Implementasi pembaca (Zip, Tar, 7z, BBF, Directory)
+│   ├── writer.rs             # Implementasi penulis (Zip, Tar, BBF, Directory)
 │   └── error.rs              # Representasi error native (CbzError)
 └── kotlin/bookarchiver/      # Berkas kelas Kotlin
     ├── BookFormat.kt         # Enum format komik
@@ -50,32 +51,39 @@ bookarchiver/
 
 ### 1. Eksepsi Kustom (`BookException.kt`)
 Semua operasi native yang gagal akan dilemparkan sebagai sub-kelas dari `BookException`:
-- `BookInitializationException`: Dilemparkan jika gagal melakukan inisialisasi berkas/FD.
-- `BookPageNotFoundException`: Dilemparkan jika halaman yang diminta tidak ada di arsip.
-- `BookIOException`: Dilemparkan jika terjadi kegagalan input-output pada level filesystem/OS.
+- `BookInitializationException`: Gagal melakukan inisialisasi berkas/FD/Path.
+- `BookPageNotFoundException`: Halaman yang diminta tidak ada di arsip/folder.
+- `BookIOException`: Kegagalan input-output pada level filesystem/OS.
 
 ### 2. Format Berkas (`BookFormat.kt`)
 ```kotlin
 package bookarchiver
 
 enum class BookFormat {
-    CBZ, // ZIP
-    CBR, // RAR (Read-Only)
-    CB7, // 7z (Read-Only)
-    CBT, // TAR
-    BBF  // Bound Book Format (Manga container)
+    CBZ,       // ZIP
+    CBR,       // RAR (Read-Only)
+    CB7,       // 7z (Read-Only)
+    CBT,       // TAR
+    BBF,       // Bound Book Format
+    DIRECTORY  // Folder direktori lokal biasa
 }
 ```
 
 ### 3. Membaca Komik (`BookReader.kt`)
-Kelas `BookReader` secara otomatis mendeteksi format berkas (CBZ, CBT, CB7, BBF) ketika diinisialisasi.
+Kelas `BookReader` secara otomatis mendeteksi format berkas ketika diinisialisasi.
 
 ```kotlin
 package bookarchiver
 
 import android.os.ParcelFileDescriptor
 
-class BookReader(pfd: ParcelFileDescriptor) : AutoCloseable {
+class BookReader : AutoCloseable {
+    // Membuka berkas komik via Android File Descriptor (Scoped Storage)
+    constructor(pfd: ParcelFileDescriptor)
+    
+    // Membuka berkas arsip atau folder direktori gambar secara langsung via Path lokal
+    constructor(path: String)
+
     // Mendapatkan daftar nama halaman komik (terurut secara alfanumerik)
     fun getPages(): Array<String>
     
@@ -88,15 +96,19 @@ class BookReader(pfd: ParcelFileDescriptor) : AutoCloseable {
 ```
 
 ### 4. Menulis Komik (`BookWriter.kt`)
-Kelas `BookWriter` digunakan untuk mengemas berkas gambar menjadi format komik tertentu.
-
 ```kotlin
 package bookarchiver
 
 import android.os.ParcelFileDescriptor
 
-class BookWriter(pfd: ParcelFileDescriptor, format: BookFormat) : AutoCloseable {
-    // Menulis byte gambar ke dalam arsip
+class BookWriter : AutoCloseable {
+    // Menulis berkas komik via Android File Descriptor (Scoped Storage)
+    constructor(pfd: ParcelFileDescriptor, format: BookFormat)
+    
+    // Menulis berkas arsip atau folder direktori gambar secara langsung via Path lokal
+    constructor(path: String, format: BookFormat)
+
+    // Menulis byte gambar ke dalam arsip/folder
     fun writePage(pageName: String, data: ByteArray)
     
     // Menyelesaikan penulisan (menulis central directory/footer) dan membebaskan memori
@@ -108,59 +120,38 @@ class BookWriter(pfd: ParcelFileDescriptor, format: BookFormat) : AutoCloseable 
 
 ## Contoh Penggunaan (Kotlin)
 
-### Membaca File Komik
+### Membaca Folder/Direktori Gambar Sebagai Komik
+Aplikasi cukup memberikan path folder gambar (misal folder cache komik hasil download yang sudah diekstrak).
 ```kotlin
-import android.content.Context
-import android.net.Uri
 import bookarchiver.BookReader
 import bookarchiver.BookPageNotFoundException
 
-fun readComic(context: Context, uri: Uri) {
-    // Membuka file descriptor dari ContentResolver Android
-    val pfd = context.contentResolver.openFileDescriptor(uri, "r") ?: return
-    
-    pfd.use { fd ->
-        BookReader(fd).use { reader ->
-            // Mengambil daftar semua halaman
-            val pages = reader.getPages()
-            println("Total Halaman: ${pages.size}")
-            
-            // Membaca isi halaman pertama
-            if (pages.isNotEmpty()) {
-                try {
-                    val pageBytes = reader.readPage(pages[0])
-                    // Proses data gambar (misal decode ke Bitmap)
-                } catch (e: BookPageNotFoundException) {
-                    e.printStackTrace()
-                }
-            }
+fun readComicFromFolder(folderPath: String) {
+    // Membuka langsung menggunakan string path lokal
+    BookReader(folderPath).use { reader ->
+        val pages = reader.getPages()
+        println("Halaman terdeteksi di folder: ${pages.size}")
+        
+        if (pages.isNotEmpty()) {
+            val pageBytes = reader.readPage(pages[0])
+            // Tampilkan atau render gambar
         }
     }
 }
 ```
 
-### Membuat/Menulis File Komik Baru (Format BBF atau CBZ)
+### Menulis Komik ke Folder Gambar Lokal
 ```kotlin
-import android.content.Context
-import android.net.Uri
 import bookarchiver.BookWriter
 import bookarchiver.BookFormat
 
-fun createComicBook(context: Context, outputUri: Uri) {
-    val pfd = context.contentResolver.openFileDescriptor(outputUri, "w") ?: return
-    
-    pfd.use { fd ->
-        // Membuat arsip komik baru dengan format Bound Book Format (BBF)
-        BookWriter(fd, BookFormat.BBF).use { writer ->
-            val page1Data = byteArrayOf(...) // Byte data gambar 1
-            val page2Data = byteArrayOf(...) // Byte data gambar 2
-            
-            writer.writePage("0001.jpg", page1Data)
-            writer.writePage("0002.png", page2Data)
-            
-            // Saat blok `use` berakhir, `close()` dipanggil secara otomatis
-            // dan metadata serta footer ZIP/BBF ditulis dengan aman.
-        }
+fun extractOrWriteToFolder(outputPath: String) {
+    // BookWriter akan membuat direktori secara otomatis jika belum ada
+    BookWriter(outputPath, BookFormat.DIRECTORY).use { writer ->
+        val imgData = byteArrayOf(...)
+        
+        // File 0001.jpg akan ditulis langsung ke folder outputPath
+        writer.writePage("0001.jpg", imgData)
     }
 }
 ```
@@ -170,18 +161,6 @@ fun createComicBook(context: Context, outputUri: Uri) {
 ## Panduan Kompilasi Silang (Cross-Compilation) ke Android
 
 Library native ini dapat dikompilasi ke library `.so` menggunakan **`cargo-ndk`**.
-
-### Prasyarat
-1. Install Rust melalui rustup.
-2. Install Android NDK (melalui SDK Manager di Android Studio).
-3. Install target arsitektur Android:
-   ```bash
-   rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
-   ```
-4. Install `cargo-ndk` tool:
-   ```bash
-   cargo install cargo-ndk
-   ```
 
 ### Perintah Kompilasi
 Jalankan perintah berikut untuk mengompilasi library rilis yang dioptimalkan untuk seluruh arsitektur Android:
@@ -196,10 +175,9 @@ Library `.so` yang teroptimasi akan dihasilkan pada folder `./jniLibs/` yang dap
 
 ## Aturan ProGuard / R8 (`proguard-rules.pro`)
 
-Karena komunikasi JNI dilakukan secara dinamis menggunakan reflection, tambahkan aturan berikut ke file ProGuard proyek Android Anda agar kelas dan eksepsi tidak di-obfuscate atau di-strip:
+Tambahkan aturan berikut ke file ProGuard proyek Android Anda agar kelas dan eksepsi tidak di-obfuscate atau di-strip:
 
 ```proguard
-# Mempertahankan kelas dan native method BookArchiver
 -keep class bookarchiver.BookReader {
     private native <methods>;
     *** nativePtr;
@@ -210,14 +188,12 @@ Karena komunikasi JNI dilakukan secara dinamis menggunakan reflection, tambahkan
     *** nativePtr;
 }
 
-# Mempertahankan enum BookFormat
 -keep class bookarchiver.BookFormat {
     **[] $VALUES;
     public static **[] values();
     public static ** valueOf(java.lang.String);
 }
 
-# Mempertahankan kelas-kelas eksepsi agar dapat dicari dan dilemparkan oleh Rust JNI
 -keep class bookarchiver.BookException { *; }
 -keep class bookarchiver.BookInitializationException { *; }
 -keep class bookarchiver.BookPageNotFoundException { *; }
