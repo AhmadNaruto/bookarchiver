@@ -1,0 +1,26 @@
+[package]
+name = "bookarchiver"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "bookarchiver"
+crate-type = ["cdylib"]
+
+[dependencies]
+jni = { version = "0.21.1", features = ["invocation"] }
+memmap2 = "0.9.4"
+zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
+alphanumeric-sort = "1.5.3"
+thiserror = "1.0"
+bytemuck = "1.14.0"
+libc = "0.2"
+tar = "0.4.40"
+sevenz-rust = "0.5.1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
